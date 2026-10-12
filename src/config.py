@@ -247,3 +247,12 @@ def setup_logging(
         handlers=handlers,
         force=True,
     )
+
+
+def load_config(
+    config_path: Optional[str | Path] = None,
+    auto_kaggle: bool = True,
+) -> ProjectConfig:
+    """Convenience helper to load ProjectConfig with Kaggle auto-detection."""
+    return ProjectConfig.load(config_path=config_path, auto_kaggle=auto_kaggle)
+
