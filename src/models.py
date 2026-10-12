@@ -1,9 +1,12 @@
-"""Model definitions, baselines, and cross-validation runners for Spoken Grammar Scoring.
+"""Model definitions, baselines, tree regressors, MLPs, and ensembling for Spoken Grammar Scoring.
 
 Implements:
 - MeanBaselineModel (empirical floor)
 - RidgeGrammarModel (regularized linear model with internal StandardScaler)
 - SVREngineModel (Support Vector Regression with RBF kernel)
+- LGBMGrammarModel (LightGBM / HistGradientBoosting decision trees)
+- MLPGrammarModel (Multi-layer perceptron neural regressor)
+- EnsembleBlender (Optimal constrained weighted blend of multiple models)
 - run_cv_experiment (leak-free 5-fold cross-validation loop and OOF metrics)
 """
 
@@ -15,7 +18,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.linear_model import RidgeCV
+from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVR
@@ -119,6 +125,156 @@ class SVREngineModel(BaseGrammarModel):
         X_arr = np.asarray(X, dtype=np.float32)
         raw_preds = self.pipeline.predict(X_arr)
         return np.clip(raw_preds, 0.0, 5.0)
+
+
+class LGBMGrammarModel(BaseGrammarModel):
+    """Gradient Boosted Decision Trees via LightGBM (with HistGradientBoosting fallback)."""
+
+    def __init__(
+        self,
+        n_estimators: int = 150,
+        learning_rate: float = 0.04,
+        max_depth: int = 5,
+        random_state: int = 42,
+    ):
+        self.n_estimators = n_estimators
+        self.learning_rate = learning_rate
+        self.max_depth = max_depth
+        self.random_state = random_state
+        self.model: Any = None
+
+        try:
+            import lightgbm as lgb
+            self.model = lgb.LGBMRegressor(
+                n_estimators=self.n_estimators,
+                learning_rate=self.learning_rate,
+                max_depth=self.max_depth,
+                num_leaves=2 ** self.max_depth - 1,
+                colsample_bytree=0.6,
+                subsample=0.8,
+                reg_alpha=0.1,
+                reg_lambda=1.0,
+                random_state=self.random_state,
+                verbose=-1,
+            )
+        except (ImportError, Exception):
+            # Fallback to standard scikit-learn HistGradientBoostingRegressor
+            self.model = HistGradientBoostingRegressor(
+                max_iter=self.n_estimators,
+                learning_rate=self.learning_rate,
+                max_depth=self.max_depth,
+                random_state=self.random_state,
+                l2_regularization=1.0,
+            )
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> LGBMGrammarModel:
+        X_arr = np.asarray(X, dtype=np.float32)
+        y_arr = np.asarray(y, dtype=np.float64)
+        self.model.fit(X_arr, y_arr)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        X_arr = np.asarray(X, dtype=np.float32)
+        preds = self.model.predict(X_arr)
+        return np.clip(preds, 0.0, 5.0)
+
+
+class MLPGrammarModel(BaseGrammarModel):
+    """Multi-Layer Perceptron Neural Regressor with internal standard scaler and early stopping."""
+
+    def __init__(
+        self,
+        hidden_layer_sizes: Tuple[int, ...] = (256, 64),
+        alpha: float = 0.01,
+        learning_rate_init: float = 0.001,
+        random_state: int = 42,
+    ):
+        self.hidden_layer_sizes = hidden_layer_sizes
+        self.alpha = alpha
+        self.learning_rate_init = learning_rate_init
+        self.random_state = random_state
+
+        self.pipeline = Pipeline([
+            ("scaler", StandardScaler()),
+            (
+                "mlp",
+                MLPRegressor(
+                    hidden_layer_sizes=self.hidden_layer_sizes,
+                    activation="relu",
+                    alpha=self.alpha,
+                    learning_rate_init=self.learning_rate_init,
+                    max_iter=300,
+                    early_stopping=True,
+                    n_iter_no_change=15,
+                    random_state=self.random_state,
+                ),
+            ),
+        ])
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> MLPGrammarModel:
+        X_arr = np.asarray(X, dtype=np.float32)
+        y_arr = np.asarray(y, dtype=np.float64)
+        self.pipeline.fit(X_arr, y_arr)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        X_arr = np.asarray(X, dtype=np.float32)
+        preds = self.pipeline.predict(X_arr)
+        return np.clip(preds, 0.0, 5.0)
+
+
+class EnsembleBlender:
+    """Optimal constrained weighted blending using scipy.optimize to minimize OOF RMSE.
+
+    Finds non-negative weights that sum to 1.0, optimizing directly on out-of-fold predictions.
+    """
+
+    def __init__(self):
+        self.weights: Dict[str, float] = {}
+        self.model_names: List[str] = []
+
+    def fit(self, oof_dict: Dict[str, np.ndarray], y_true: np.ndarray) -> EnsembleBlender:
+        """Find optimal non-negative weights w_i sum(w_i)=1 minimizing RMSE."""
+        self.model_names = list(oof_dict.keys())
+        k = len(self.model_names)
+        if k == 0:
+            raise ValueError("oof_dict cannot be empty.")
+
+        # Matrix of shape (N, k)
+        OOF_mat = np.column_stack([oof_dict[m] for m in self.model_names])
+        y_arr = np.asarray(y_true, dtype=np.float64)
+
+        def loss(w: np.ndarray) -> float:
+            blend = np.dot(OOF_mat, w)
+            return float(np.sqrt(np.mean((y_arr - blend) ** 2)))
+
+        # Uniform initial guess
+        init_w = np.ones(k) / k
+        bounds = [(0.0, 1.0) for _ in range(k)]
+        constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
+
+        res = minimize(loss, init_w, bounds=bounds, constraints=constraints, method="SLSQP")
+        best_w = res.x if res.success else init_w
+
+        # Normalize to strictly sum to 1.0
+        best_w = np.clip(best_w, 0.0, 1.0)
+        best_w /= np.sum(best_w)
+
+        self.weights = {name: float(w) for name, w in zip(self.model_names, best_w)}
+        logger.info(f"Ensemble blender fitted with weights: {self.weights}")
+        return self
+
+    def predict(self, test_dict: Dict[str, np.ndarray]) -> np.ndarray:
+        """Generate blended test predictions using fitted optimal weights."""
+        if not self.weights:
+            raise RuntimeError("EnsembleBlender is not fitted. Call fit() first.")
+
+        blended = np.zeros_like(next(iter(test_dict.values())), dtype=np.float64)
+        for name, w in self.weights.items():
+            if name in test_dict:
+                blended += w * test_dict[name]
+
+        return np.clip(blended, 0.0, 5.0)
 
 
 def run_cv_experiment(
