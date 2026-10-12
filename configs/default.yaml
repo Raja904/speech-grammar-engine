@@ -1,0 +1,51 @@
+# Default Configuration for Kaggle Spoken Grammar Scoring Engine
+
+project_name: "spoken-grammar-scoring"
+random_seed: 42
+
+paths:
+  # Base directories. Will be overridden dynamically if running on Kaggle.
+  data_dir: "data"
+  output_dir: "outputs"
+  cache_dir: "features_cache"
+  checkpoints_dir: "checkpoints"
+  runs_dir: "runs"
+
+  # Expected filenames / patterns
+  train_csv_filename: "train.csv"
+  test_csv_filename: "test.csv"
+  sample_submission_filename: "sample_submission.csv"
+  audio_dir_train: "train"
+  audio_dir_test: "test"
+
+audio:
+  target_sample_rate: 16000
+  mono: true
+  max_duration_sec: 30.0
+  silence_threshold_db: -40.0
+  clipping_threshold: 0.999
+
+validation:
+  n_splits: 5
+  random_seed: 42
+  target_col: null      # Auto-detected if null (e.g. 'score', 'grammar_score', etc.)
+  id_col: null          # Auto-detected if null
+  audio_col: null       # Auto-detected if null
+  group_col: null       # Speaker/group column if detected in metadata
+
+audit:
+  check_audio_signals: true
+  compute_signal_stats: true
+  max_samples: null     # Set to an integer to limit audit during quick checks, null for all
+
+feature_extraction:
+  encoder_name: "facebook/wav2vec2-base-960h"
+  encoder_revision: "main"
+  pooling_method: "mean"
+  batch_size: 16
+
+model:
+  baseline_strategy: "mean"
+  ridge_alphas: [0.01, 0.1, 1.0, 10.0, 100.0]
+  svr_c: 1.0
+  svr_epsilon: 0.1

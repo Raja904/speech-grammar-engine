@@ -1,0 +1,17 @@
+# Core Numerical & Tabular
+numpy>=1.23.0
+pandas>=2.0.0
+scipy>=1.10.0
+
+# Machine Learning & Metrics
+scikit-learn>=1.2.0
+
+# Audio Processing & IO
+soundfile>=0.12.1
+
+# Configuration & Utilities
+pyyaml>=6.0
+tqdm>=4.65.0
+
+# Testing
+pytest>=7.3.0
