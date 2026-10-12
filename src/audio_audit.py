@@ -457,15 +457,17 @@ def run_full_dataset_audit(
         sub_p = Path(sample_sub_path)
         if sub_p.exists():
             sub_df = pd.read_csv(sub_p)
-            row_match = len(sub_df) == len(test_df)
             sub_mapping = detect_columns(sub_df, is_test=True)
+            row_match = len(sub_df) == len(test_df)
+            
+            sub_col_exists = sub_mapping.filename_col in sub_df.columns
+            test_col_exists = test_mapping.filename_col in test_df.columns
+            
             id_align = False
-            if (
-                row_match
-                and sub_mapping.filename_col in sub_df.columns
-                and test_mapping.filename_col in test_df.columns
-            ):
-                id_align = bool((sub_df[sub_mapping.filename_col].astype(str).values == test_fnames.values).all())
+            if row_match and sub_col_exists and test_col_exists:
+                sub_arr = sub_df[sub_mapping.filename_col].astype(str).to_numpy()
+                test_arr = test_fnames.to_numpy()
+                id_align = bool(np.array_equal(sub_arr, test_arr))
 
             sub_check = {
                 "valid": bool(row_match and id_align),
