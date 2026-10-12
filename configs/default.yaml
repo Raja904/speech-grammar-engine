@@ -28,10 +28,10 @@ audio:
 validation:
   n_splits: 5
   random_seed: 42
-  target_col: null      # Auto-detected if null (e.g. 'score', 'grammar_score', etc.)
-  id_col: null          # Auto-detected if null
-  audio_col: null       # Auto-detected if null
-  group_col: null       # Speaker/group column if detected in metadata
+  target_col: "label"      # Target column in train.csv
+  id_col: "filename"       # Identifier column
+  audio_col: "filename"    # Audio WAV filename column
+  group_col: null          # No speaker column in competition CSVs
 
 audit:
   check_audio_signals: true

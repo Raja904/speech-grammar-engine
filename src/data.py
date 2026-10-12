@@ -22,7 +22,7 @@ FILENAME_CANDIDATES = [
     "id", "file_id", "recording_id", "sample_id", "Id"
 ]
 TARGET_CANDIDATES = [
-    "score", "grammar_score", "grammar", "proficiency", "target", "label", "overall_score"
+    "label", "score", "grammar_score", "grammar", "proficiency", "target", "overall_score"
 ]
 SPEAKER_CANDIDATES = [
     "speaker", "speaker_id", "speaker_name", "speakerid", "user_id", "subject_id", "person_id"

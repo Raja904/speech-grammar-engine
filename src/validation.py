@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupKFold, KFold, StratifiedGroupKFold
+from sklearn.model_selection import GroupKFold, KFold, StratifiedGroupKFold, StratifiedKFold
 
 from src.artifacts import atomic_save_json
 from src.metrics import compute_regression_metrics
@@ -61,8 +61,21 @@ def create_folds(
         groups = df_out[group_col].values
         for fold_idx, (_, val_idx) in enumerate(gkf.split(df_out, groups=groups)):
             df_out.iloc[val_idx, df_out.columns.get_loc(fold_col_name)] = fold_idx
+    elif target_col and target_col in df_out.columns:
+        logger.info(f"Target column '{target_col}' provided. Applying StratifiedKFold on discretized bins.")
+        y_vals = df_out[target_col].dropna().values
+        # Create discrete bins (if <= 20 unique values and each class has at least n_splits samples, use directly; otherwise bin)
+        counts = pd.Series(y_vals).value_counts()
+        if counts.min() >= n_splits:
+            bins = y_vals
+        else:
+            bins = pd.qcut(y_vals, q=n_splits, labels=False, duplicates="drop")
+
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        for fold_idx, (_, val_idx) in enumerate(skf.split(df_out, bins)):
+            df_out.iloc[val_idx, df_out.columns.get_loc(fold_col_name)] = fold_idx
     else:
-        logger.info(f"No group column detected. Using standard KFold (n_splits={n_splits}, seed={seed}).")
+        logger.info(f"No group or target column detected. Using standard KFold (n_splits={n_splits}, seed={seed}).")
         kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
         for fold_idx, (_, val_idx) in enumerate(kf.split(df_out)):
             df_out.iloc[val_idx, df_out.columns.get_loc(fold_col_name)] = fold_idx
