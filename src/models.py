@@ -277,6 +277,90 @@ class EnsembleBlender:
         return np.clip(blended, 0.0, 5.0)
 
 
+class CrossFittedEnsembleBlender:
+    """Nested, leak-free cross-fitted ensemble blender.
+
+    Solves for optimal non-negative weights on K-1 folds, evaluates strictly
+    on the held-out fold, and averages the resulting fold weights for test inference.
+    Guarantees that blended OOF predictions are 100% out-of-fold without in-sample optimism.
+    """
+
+    def __init__(self):
+        self.fold_weights: List[Dict[str, float]] = []
+        self.final_weights: Dict[str, float] = {}
+        self.model_names: List[str] = []
+        self.blended_oof: Optional[np.ndarray] = None
+
+    def fit(
+        self,
+        oof_dict: Dict[str, np.ndarray],
+        y_true: np.ndarray,
+        fold_indices: np.ndarray,
+    ) -> CrossFittedEnsembleBlender:
+        """Fit weights on outer folds and evaluate strictly out-of-fold."""
+        self.model_names = list(oof_dict.keys())
+        k_models = len(self.model_names)
+        if k_models == 0:
+            raise ValueError("oof_dict cannot be empty.")
+
+        n_samples = len(y_true)
+        self.blended_oof = np.zeros(n_samples, dtype=np.float64)
+        unique_folds = sorted(np.unique(fold_indices))
+        self.fold_weights = []
+
+        OOF_mat = np.column_stack([oof_dict[m] for m in self.model_names])
+        y_arr = np.asarray(y_true, dtype=np.float64)
+
+        for fold in unique_folds:
+            val_mask = fold_indices == fold
+            train_mask = ~val_mask
+
+            X_blend_train = OOF_mat[train_mask]
+            y_blend_train = y_arr[train_mask]
+
+            def loss(w: np.ndarray) -> float:
+                b = np.dot(X_blend_train, w)
+                return float(np.sqrt(np.mean((y_blend_train - b) ** 2)))
+
+            init_w = np.ones(k_models) / k_models
+            bounds = [(0.0, 1.0) for _ in range(k_models)]
+            constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
+
+            res = minimize(loss, init_w, bounds=bounds, constraints=constraints, method="SLSQP")
+            best_w = res.x if res.success else init_w
+            best_w = np.clip(best_w, 0.0, 1.0)
+            best_w /= np.sum(best_w)
+
+            fold_w_dict = {name: float(w) for name, w in zip(self.model_names, best_w)}
+            self.fold_weights.append(fold_w_dict)
+
+            # Predict the held-out fold strictly out-of-fold
+            X_blend_val = OOF_mat[val_mask]
+            self.blended_oof[val_mask] = np.dot(X_blend_val, best_w)
+
+        # Average weights across all folds for final test predictions
+        avg_weights = {}
+        for name in self.model_names:
+            avg_weights[name] = float(np.mean([fw[name] for fw in self.fold_weights]))
+        tot = sum(avg_weights.values())
+        self.final_weights = {name: w / tot for name, w in avg_weights.items()}
+
+        logger.info(f"Cross-fitted blender complete. Final average weights: {self.final_weights}")
+        return self
+
+    def predict(self, test_dict: Dict[str, np.ndarray]) -> np.ndarray:
+        """Generate blended test predictions using averaged cross-fitted weights."""
+        if not self.final_weights:
+            raise RuntimeError("CrossFittedEnsembleBlender is not fitted. Call fit() first.")
+
+        blended = np.zeros_like(next(iter(test_dict.values())), dtype=np.float64)
+        for name, w in self.final_weights.items():
+            if name in test_dict:
+                blended += w * test_dict[name]
+
+        return np.clip(blended, 0.0, 5.0)
+
+
 def run_cv_experiment(
     fold_df: pd.DataFrame,
     features: np.ndarray,

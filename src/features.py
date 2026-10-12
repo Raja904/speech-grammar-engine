@@ -147,12 +147,13 @@ def extract_classical_acoustic_features(audio: np.ndarray, sr: int = 16000) -> n
 def extract_wav2vec2_embeddings(
     audio_paths: List[Path],
     model_name: str = "facebook/wav2vec2-base-960h",
+    pooling_method: str = "mean",
     batch_size: int = 8,
     max_duration_sec: float = 20.0,
 ) -> np.ndarray:
     """Extract speech representations using HuggingFace Wav2Vec2 encoder.
 
-    Falls back to classical acoustic features if PyTorch or transformers is unavailable.
+    Supports 'mean' (768-dim) and 'mean_std' (1536-dim) pooling.
     """
     try:
         import torch
@@ -162,7 +163,7 @@ def extract_wav2vec2_embeddings(
         return extract_dataset_features(audio_paths, method="acoustic")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Extracting Wav2Vec2 embeddings on device: {device} using {model_name}")
+    logger.info(f"Extracting Wav2Vec2 embeddings on device: {device} using {model_name} (pooling={pooling_method})")
 
     feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name).to(device)
@@ -170,7 +171,7 @@ def extract_wav2vec2_embeddings(
 
     all_embeddings: List[np.ndarray] = []
 
-    for i in tqdm(range(0, len(audio_paths), batch_size), desc="Extracting Wav2Vec2 features"):
+    for i in tqdm(range(0, len(audio_paths), batch_size), desc=f"Extracting Wav2Vec2 ({pooling_method})"):
         batch_paths = audio_paths[i : i + batch_size]
         batch_wavs = []
         for p in batch_paths:
@@ -190,10 +191,13 @@ def extract_wav2vec2_embeddings(
 
         with torch.no_grad():
             outputs = model(**inputs)
-            # outputs.last_hidden_state: (batch, seq_len, hidden_dim)
             hidden_states = outputs.last_hidden_state
-            # Mean pooling over valid sequence length
-            pooled = torch.mean(hidden_states, dim=1).cpu().numpy()
+            if pooling_method == "mean_std":
+                m = torch.mean(hidden_states, dim=1)
+                s = torch.std(hidden_states, dim=1)
+                pooled = torch.cat([m, s], dim=1).cpu().numpy()
+            else:
+                pooled = torch.mean(hidden_states, dim=1).cpu().numpy()
             all_embeddings.append(pooled)
 
     return np.vstack(all_embeddings).astype(np.float32)
@@ -203,6 +207,7 @@ def extract_dataset_features(
     audio_paths: List[Optional[Path]],
     method: str = "acoustic",
     model_name: str = "facebook/wav2vec2-base-960h",
+    pooling_method: str = "mean",
     cache_path: Optional[Path] = None,
 ) -> np.ndarray:
     """Extract features for a list of audio paths, with disk caching support.
@@ -211,7 +216,8 @@ def extract_dataset_features(
         audio_paths: List of resolved audio file paths.
         method: 'acoustic' for fast baseline or 'wav2vec2' for deep representations.
         model_name: Pretrained model identifier if using transformer.
-        cache_path: Path to save/load cached .npy feature matrix.
+        pooling_method: 'mean' or 'mean_std'.
+        cache_path: Path to save/load cached .npy feature matrix (avoids overwriting existing caches).
 
     Returns:
         2D numpy array of shape (N, feature_dim).
@@ -225,7 +231,11 @@ def extract_dataset_features(
     valid_paths = [p for p in audio_paths if p is not None and p.exists()]
     if method == "wav2vec2":
         try:
-            feats = extract_wav2vec2_embeddings(valid_paths, model_name=model_name)
+            feats = extract_wav2vec2_embeddings(
+                valid_paths,
+                model_name=model_name,
+                pooling_method=pooling_method,
+            )
         except Exception as e:
             logger.warning(f"Wav2Vec2 extraction failed ({e}). Falling back to acoustic features.")
             method = "acoustic"

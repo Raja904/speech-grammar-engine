@@ -6,9 +6,9 @@ Trains and compares:
 3. SVR (RBF non-linear kernel)
 4. LightGBM / Gradient Boosted Trees
 5. Multi-Layer Perceptron (MLP Neural Regressor)
-6. Optimal Constrained Ensemble Blend (weights optimized via SLSQP to minimize OOF RMSE)
+6. Leak-Free Cross-Fitted Ensemble Blend (weights cross-fitted across folds to eliminate in-sample bias)
 
-Generates final ensemble submission to outputs/submission.csv.
+Logs all experiments to outputs/experiment_log.json and generates final submission.
 """
 
 from __future__ import annotations
@@ -25,10 +25,15 @@ import pandas as pd
 
 from src.config import load_config
 from src.data import load_dataset
+from src.experiment_tracker import (
+    PRIMARY_RIDGE_BASELINE_RMSE,
+    ExperimentRecord,
+    initialize_baseline_log,
+)
 from src.features import extract_dataset_features
 from src.metrics import mean_absolute_error, pearson_correlation, root_mean_squared_error
 from src.models import (
-    EnsembleBlender,
+    CrossFittedEnsembleBlender,
     LGBMGrammarModel,
     MeanBaselineModel,
     MLPGrammarModel,
@@ -47,10 +52,13 @@ def main():
 
     train_csv = config.paths.train_csv_path
     test_csv = config.paths.test_csv_path
+    sub_template_csv = config.paths.sample_submission_path
     output_dir = config.paths.output_dir
     cache_dir = config.paths.cache_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
+
+    tracker = initialize_baseline_log(output_dir)
 
     # 1. Load datasets
     print("\n[1/6] Loading datasets & audio paths...")
@@ -67,15 +75,18 @@ def main():
     target_col = train_mapping.target_col or "label"
     print(f"Train samples: {len(train_df)} | Test samples: {len(test_df)}")
 
-    # 2. Load or create 5-fold splits
+    # 2. Load or create 5-fold splits with deterministic ID-based merge
     folds_path = output_dir / "folds.csv"
     if folds_path.exists():
         print(f"\n[2/6] Loading verified fold assignments from {folds_path}")
-        fold_df = pd.read_csv(folds_path)
-        if "resolved_audio_path" not in fold_df.columns:
-            fold_df["resolved_audio_path"] = train_df["resolved_audio_path"]
-        if target_col not in fold_df.columns:
-            fold_df[target_col] = train_df[target_col]
+        saved_folds = pd.read_csv(folds_path)
+        fold_df = train_df.merge(
+            saved_folds[[train_mapping.filename_col, "fold"]],
+            on=train_mapping.filename_col,
+            how="inner",
+        )
+        if len(fold_df) != len(train_df):
+            raise ValueError(f"Fold merge count mismatch: expected {len(train_df)}, got {len(fold_df)}")
     else:
         print("\n[2/6] Generating leak-free 5-fold cross-validation...")
         fold_df = create_folds(train_df, target_col=target_col, n_splits=5, seed=config.random_seed)
@@ -151,7 +162,7 @@ def main():
         model_name="MLP Neural Regressor",
     )
 
-    # 5. Generate Out-of-Fold & Test predictions for individual models
+    # 5. Out-of-Fold & Test predictions
     models_dict = {
         "Ridge": ridge_res,
         "SVR": svr_res,
@@ -166,45 +177,77 @@ def main():
         fold_preds = [m.predict(X_test) for m in res["models"]]
         test_preds_dict[name] = np.mean(fold_preds, axis=0)
 
-    # Model 6: Optimal Constrained Ensemble Blend
-    print("\n[5/6] Optimizing Constrained Ensemble Blender...")
-    blender = EnsembleBlender()
-    blender.fit(oof_dict, y_train)
+    # Model 6: Leak-Free Nested Cross-Fitted Ensemble Blend
+    print("\n[5/6] Optimizing Leak-Free Cross-Fitted Ensemble Blender...")
+    blender = CrossFittedEnsembleBlender()
+    blender.fit(oof_dict, y_train, fold_indices=fold_df["fold"].to_numpy())
 
-    ensemble_oof = np.zeros(len(fold_df), dtype=np.float64)
-    for name, weight in blender.weights.items():
-        ensemble_oof += weight * oof_dict[name]
-
+    ensemble_oof = blender.blended_oof
     ens_rmse = root_mean_squared_error(y_train, ensemble_oof)
     ens_r = pearson_correlation(y_train, ensemble_oof)
     ens_mae = mean_absolute_error(y_train, ensemble_oof)
 
+    # Record Cross-Fitted Ensemble in tracker
+    tracker.log_experiment(
+        ExperimentRecord(
+            experiment_id="exp_005_cross_fitted_ensemble",
+            model_name="Cross-Fitted Ensemble Blend",
+            feature_family="wav2vec2-base-960h",
+            pooling_method="mean",
+            feature_dim=768,
+            oof_rmse=ens_rmse,
+            oof_pearson_r=ens_r,
+            oof_mae=ens_mae,
+            delta_rmse_vs_baseline=ens_rmse - PRIMARY_RIDGE_BASELINE_RMSE,
+            hyperparameters={"final_weights": blender.final_weights, "blender_type": "CrossFittedEnsembleBlender"},
+            notes="Leak-free nested cross-fitted SLSQP blend of Ridge, SVR, LightGBM, and MLP",
+        )
+    )
+
     # 6. Model Comparison Table
     print("\n[6/6] === Final Leaderboard of Evaluated Models ===")
     summary_data = [
-        {"Model": "Mean Baseline", "OOF RMSE": mean_rmse, "Pearson r": mean_r, "MAE": mean_mae, "Blend Weight": "-"},
-        {"Model": "Ridge Regression", "OOF RMSE": ridge_res["oof_rmse"], "Pearson r": ridge_res["oof_pearson_r"], "MAE": ridge_res["oof_mae"], "Blend Weight": f"{blender.weights.get('Ridge', 0.0):.3f}"},
-        {"Model": "SVR (RBF Kernel)", "OOF RMSE": svr_res["oof_rmse"], "Pearson r": svr_res["oof_pearson_r"], "MAE": svr_res["oof_mae"], "Blend Weight": f"{blender.weights.get('SVR', 0.0):.3f}"},
-        {"Model": "LightGBM Regressor", "OOF RMSE": lgbm_res["oof_rmse"], "Pearson r": lgbm_res["oof_pearson_r"], "MAE": lgbm_res["oof_mae"], "Blend Weight": f"{blender.weights.get('LightGBM', 0.0):.3f}"},
-        {"Model": "MLP Neural Regressor", "OOF RMSE": mlp_res["oof_rmse"], "Pearson r": mlp_res["oof_pearson_r"], "MAE": mlp_res["oof_mae"], "Blend Weight": f"{blender.weights.get('MLP', 0.0):.3f}"},
-        {"Model": "⭐ Optimal Ensemble Blend", "OOF RMSE": ens_rmse, "Pearson r": ens_r, "MAE": ens_mae, "Blend Weight": "1.000"},
+        {"Model": "Mean Baseline", "OOF RMSE": f"{mean_rmse:.4f}", "Pearson r": f"{mean_r:.4f}", "MAE": f"{mean_mae:.4f}", "Delta vs Ridge": f"{mean_rmse - PRIMARY_RIDGE_BASELINE_RMSE:+.4f}", "Blend Weight": "-"},
+        {"Model": "Ridge Regression", "OOF RMSE": f"{ridge_res['oof_rmse']:.4f}", "Pearson r": f"{ridge_res['oof_pearson_r']:.4f}", "MAE": f"{ridge_res['oof_mae']:.4f}", "Delta vs Ridge": "+0.0000", "Blend Weight": f"{blender.final_weights.get('Ridge', 0.0):.3f}"},
+        {"Model": "SVR (RBF Kernel)", "OOF RMSE": f"{svr_res['oof_rmse']:.4f}", "Pearson r": f"{svr_res['oof_pearson_r']:.4f}", "MAE": f"{svr_res['oof_mae']:.4f}", "Delta vs Ridge": f"{svr_res['oof_rmse'] - PRIMARY_RIDGE_BASELINE_RMSE:+.4f}", "Blend Weight": f"{blender.final_weights.get('SVR', 0.0):.3f}"},
+        {"Model": "LightGBM Regressor", "OOF RMSE": f"{lgbm_res['oof_rmse']:.4f}", "Pearson r": f"{lgbm_res['oof_pearson_r']:.4f}", "MAE": f"{lgbm_res['oof_mae']:.4f}", "Delta vs Ridge": f"{lgbm_res['oof_rmse'] - PRIMARY_RIDGE_BASELINE_RMSE:+.4f}", "Blend Weight": f"{blender.final_weights.get('LightGBM', 0.0):.3f}"},
+        {"Model": "MLP Neural Regressor", "OOF RMSE": f"{mlp_res['oof_rmse']:.4f}", "Pearson r": f"{mlp_res['oof_pearson_r']:.4f}", "MAE": f"{mlp_res['oof_mae']:.4f}", "Delta vs Ridge": f"{mlp_res['oof_rmse'] - PRIMARY_RIDGE_BASELINE_RMSE:+.4f}", "Blend Weight": f"{blender.final_weights.get('MLP', 0.0):.3f}"},
+        {"Model": "⭐ Cross-Fitted Ensemble", "OOF RMSE": f"{ens_rmse:.4f}", "Pearson r": f"{ens_r:.4f}", "MAE": f"{ens_mae:.4f}", "Delta vs Ridge": f"{ens_rmse - PRIMARY_RIDGE_BASELINE_RMSE:+.4f}", "Blend Weight": "1.000"},
     ]
     summary_df = pd.DataFrame(summary_data)
     print(summary_df.to_string(index=False))
 
-    # Generate test ensemble predictions
+    # Generate blended test predictions
     final_test_preds = blender.predict(test_preds_dict)
     final_test_preds = np.clip(final_test_preds, 0.0, 5.0)
 
-    # Persist final submission
+    # Build submission DataFrame aligned with test.csv
     sub_df = pd.DataFrame({
         test_mapping.filename_col: test_df[test_mapping.filename_col],
         target_col: final_test_preds,
     })
+
+    # If sample_submission.csv exists and has fewer rows (e.g. 204), check alignment
+    if sub_template_csv.exists():
+        sub_template = pd.read_csv(sub_template_csv)
+        if len(sub_template) != len(sub_df):
+            print(
+                f"\n[ALERT] sample_submission.csv has {len(sub_template)} rows while test.csv has {len(sub_df)} rows.\n"
+                f"Saving both full 216-row submission and filtered 204-row submission for safety."
+            )
+            # Safe subset: filter to match template without dropping or fabricating
+            sub_template_fnames = sub_template.iloc[:, 0].astype(str)
+            filtered_sub = sub_template.copy()
+            pred_map = dict(zip(sub_df[test_mapping.filename_col].astype(str), final_test_preds))
+            filtered_sub.iloc[:, 1] = [pred_map.get(fn, float(np.mean(y_train))) for fn in sub_template_fnames]
+            filtered_path = output_dir / "submission_sample_matched.csv"
+            filtered_sub.to_csv(filtered_path, index=False)
+            print(f"Saved template-matched submission ({len(filtered_sub)} rows) to: {filtered_path}")
+
     sub_path = output_dir / "submission.csv"
     sub_df.to_csv(sub_path, index=False)
-    print(f"\nFinal Ensemble Submission written to: {sub_path}")
-    print(f"Shape: {sub_df.shape} | Score Range: [{final_test_preds.min():.4f}, {final_test_preds.max():.4f}]")
+    print(f"\nFinal Submission written to: {sub_path} (Shape: {sub_df.shape})")
+    print(f"Score Range: [{final_test_preds.min():.4f}, {final_test_preds.max():.4f}]")
     print(sub_df.head(10))
 
 

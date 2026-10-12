@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from src.models import (
+    CrossFittedEnsembleBlender,
     EnsembleBlender,
     LGBMGrammarModel,
     MeanBaselineModel,
@@ -74,6 +75,25 @@ def test_ensemble_blender():
 
     assert len(blender.weights) == 2
     assert pytest.approx(sum(blender.weights.values()), 0.01) == 1.0
+
+    test_preds = blender.predict({"m1": oof1[:2], "m2": oof2[:2]})
+    assert len(test_preds) == 2
+    assert np.all((test_preds >= 0.0) & (test_preds <= 5.0))
+
+
+def test_cross_fitted_ensemble_blender():
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 1.2, 2.2, 3.2, 4.2, 5.2])
+    oof1 = y + 0.1
+    oof2 = y - 0.1
+    folds = np.array([0, 1, 2, 3, 4, 0, 1, 2, 3, 4])
+
+    blender = CrossFittedEnsembleBlender()
+    blender.fit({"m1": oof1, "m2": oof2}, y, fold_indices=folds)
+
+    assert len(blender.final_weights) == 2
+    assert len(blender.fold_weights) == 5
+    assert len(blender.blended_oof) == len(y)
+    assert pytest.approx(sum(blender.final_weights.values()), 0.01) == 1.0
 
     test_preds = blender.predict({"m1": oof1[:2], "m2": oof2[:2]})
     assert len(test_preds) == 2
