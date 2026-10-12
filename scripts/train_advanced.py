@@ -23,6 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import numpy as np
 import pandas as pd
 
+from src.artifacts import export_competition_submission
 from src.config import load_config
 from src.data import load_dataset
 from src.experiment_tracker import (
@@ -244,9 +245,8 @@ def main():
             filtered_sub.to_csv(filtered_path, index=False)
             print(f"Saved template-matched submission ({len(filtered_sub)} rows) to: {filtered_path}")
 
-    sub_path = output_dir / "submission.csv"
-    sub_df.to_csv(sub_path, index=False)
-    print(f"\nFinal Submission written to: {sub_path} (Shape: {sub_df.shape})")
+    exported_paths = export_competition_submission(sub_df, output_dir=output_dir)
+    print(f"\nFinal Submission written to: {exported_paths} (Shape: {sub_df.shape})")
     print(f"Score Range: [{final_test_preds.min():.4f}, {final_test_preds.max():.4f}]")
     print(sub_df.head(10))
 

@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import numpy as np
 import pandas as pd
 
+from src.artifacts import export_competition_submission
 from src.config import load_config
 from src.data import load_dataset
 from src.features import extract_dataset_features
@@ -146,9 +147,8 @@ def main():
         test_mapping.filename_col: test_df[test_mapping.filename_col],
         target_col: final_test_preds,
     })
-    sub_path = output_dir / "submission.csv"
-    sub_df.to_csv(sub_path, index=False)
-    print(f"\nSubmission generated and saved to: {sub_path}")
+    exported_paths = export_competition_submission(sub_df, output_dir=output_dir)
+    print(f"\nSubmission generated and exported to: {exported_paths}")
     print(f"Shape: {sub_df.shape} | Target range: [{final_test_preds.min():.4f}, {final_test_preds.max():.4f}]")
     print(sub_df.head())
 

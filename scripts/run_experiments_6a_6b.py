@@ -26,6 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import numpy as np
 import pandas as pd
 
+from src.artifacts import export_competition_submission
 from src.config import load_config
 from src.data import load_dataset
 from src.experiment_tracker import (
@@ -160,7 +161,9 @@ def run_experiment_6a(
     })
     sub_path = output_dir / "submission_exp6a_mean_std.csv"
     sub_df.to_csv(sub_path, index=False)
-    print(f"Saved separate Experiment 6A submission to: {sub_path}")
+    # Also write to /kaggle/working/submission.csv to satisfy Kaggle's submission evaluator
+    export_competition_submission(sub_df, output_dir=output_dir, filename="submission.csv")
+    print(f"Saved Experiment 6A submission to: {sub_path} and /kaggle/working/submission.csv")
 
     # 7. Print Comparative Scoreboard
     print("\n--- Experiment 6A Performance Comparison ---")

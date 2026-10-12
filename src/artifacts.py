@@ -169,3 +169,48 @@ class ManifestManager:
             "artifacts": artifacts or {},
         }
         self.save()
+
+
+def export_competition_submission(
+    sub_df: Any,
+    output_dir: Optional[Path | str] = None,
+    filename: str = "submission.csv",
+) -> List[Path]:
+    """Export submission DataFrame to all standard locations, guaranteeing /kaggle/working/submission.csv exists.
+
+    In Kaggle competitions, the automatic submission evaluator specifically looks for
+    '/kaggle/working/submission.csv'. If a script saves to a subfolder like 'outputs/submission.csv'
+    or './speech-grammar-engine/outputs/submission.csv', Kaggle fails with:
+    'Submission file not found: submission.csv'.
+
+    This function safely writes to:
+    1. output_dir / filename (e.g. outputs/submission.csv)
+    2. /kaggle/working/submission.csv (if in Kaggle environment)
+    3. Path.cwd() / filename (current working directory)
+    """
+    exported_paths: List[Path] = []
+
+    # 1. Output directory
+    if output_dir:
+        out_p = Path(output_dir) / filename
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        sub_df.to_csv(out_p, index=False)
+        exported_paths.append(out_p)
+
+    # 2. Kaggle working root (/kaggle/working/submission.csv)
+    kaggle_working = Path("/kaggle/working")
+    if kaggle_working.exists() and kaggle_working.is_dir():
+        kaggle_dest = kaggle_working / filename
+        sub_df.to_csv(kaggle_dest, index=False)
+        exported_paths.append(kaggle_dest)
+        logger.info(f"Exported competition submission directly to Kaggle root: {kaggle_dest}")
+
+    # 3. Current working directory root if not already in list
+    cwd_dest = Path.cwd() / filename
+    if cwd_dest not in exported_paths:
+        sub_df.to_csv(cwd_dest, index=False)
+        exported_paths.append(cwd_dest)
+
+    logger.info(f"Submission successfully written to {len(exported_paths)} locations: {exported_paths}")
+    return exported_paths
+
