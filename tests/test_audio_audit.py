@@ -149,3 +149,31 @@ def test_run_full_dataset_audit_pipeline():
         md_text = report.to_markdown()
         assert "# Kaggle Spoken Grammar Scoring — Dataset Audit Report" in md_text
         assert "Train CSV Shape" in md_text
+
+
+def test_run_full_dataset_audit_mismatched_submission_shape():
+    """Ensure mismatched row count between submission and test does not trigger broadcast ValueError."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_p = Path(tmp_dir)
+        train_df = pd.DataFrame({"filename": ["rec1.wav"], "score": [3.0]})
+        test_df = pd.DataFrame({"filename": ["t1.wav", "t2.wav"], "score": [-1, -1]})
+        sub_df = pd.DataFrame({"filename": ["t1.wav"], "score": [3.0]})
+
+        train_csv = tmp_p / "train.csv"
+        test_csv = tmp_p / "test.csv"
+        sub_csv = tmp_p / "sub.csv"
+        train_df.to_csv(train_csv, index=False)
+        test_df.to_csv(test_csv, index=False)
+        sub_df.to_csv(sub_csv, index=False)
+
+        report = run_full_dataset_audit(
+            train_csv_path=train_csv,
+            test_csv_path=test_csv,
+            sample_sub_path=sub_csv,
+        )
+        assert report.tabular.sample_submission_check["valid"] is False
+        assert report.tabular.sample_submission_check["row_count_match"] is False
+        assert report.tabular.sample_submission_check["submission_rows"] == 1
+        assert report.tabular.sample_submission_check["test_rows"] == 2
+        assert report.tabular.sample_submission_check["id_alignment_match"] is False
+

@@ -460,8 +460,12 @@ def run_full_dataset_audit(
             row_match = len(sub_df) == len(test_df)
             sub_mapping = detect_columns(sub_df, is_test=True)
             id_align = False
-            if sub_mapping.filename_col in sub_df.columns and test_mapping.filename_col in test_df.columns:
-                id_align = (sub_df[sub_mapping.filename_col].astype(str).values == test_fnames.values).all()
+            if (
+                row_match
+                and sub_mapping.filename_col in sub_df.columns
+                and test_mapping.filename_col in test_df.columns
+            ):
+                id_align = bool((sub_df[sub_mapping.filename_col].astype(str).values == test_fnames.values).all())
 
             sub_check = {
                 "valid": bool(row_match and id_align),
